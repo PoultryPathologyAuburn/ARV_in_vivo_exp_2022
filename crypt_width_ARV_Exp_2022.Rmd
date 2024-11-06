@@ -1,0 +1,174 @@
+---
+title: "R Notebook"
+output: html_notebook
+author: "Zubair Khalid"
+date: "09/08/2024"
+editor_options: 
+  chunk_output_type: console
+---
+# setup
+
+```{r setup, include=FALSE}
+
+# setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# Load necessary packages
+library(ggplot2)
+library(showtext)
+
+# Add Times New Roman font
+font_add(family = "Times New Roman", regular = "/System/Library/Fonts/Supplemental/Times New Roman.ttf")
+showtext_auto()
+
+# Set a global theme
+theme_set(
+  theme_linedraw(base_size = 24, base_family = "Times New Roman") +
+    theme(
+      # axis.text = element_text(size = 20),
+      axis.title = element_text(size = 24),
+      legend.text = element_text(size = 20),
+      legend.title = element_text(size = 24, face = "bold"),
+      strip.text = element_text(size = 20),
+      legend.key.size = unit(2, "lines"),
+      panel.spacing = unit(2, "lines")# Turn off minor grid lines
+    )
+)
+```
+
+# Jejunum data prep
+
+```{r prep data, echo=FALSE}
+# Load the required libraries
+library(ggplot2)
+library(readxl)
+
+# Load your data (adjust the path as needed)
+data <- read.csv("inputs/final_crypt_width_ARV_Exp_2022.csv")
+
+# Convert relevant columns to factors for proper plotting
+data$Treatment <- factor(data$Treatment, levels = c("NC", "Low AL", "High AL", "Low S1133", "High S1133"))
+unique(data$Treatment)
+data$dpi <- factor(data$dpi, levels = c("07 dpi", "21 dpi", "35 dpi"))
+unique(data$dpi)
+
+# Define a threshold for detecting outliers (e.g., values beyond 1.5 times the interquartile range)
+Q1 <- quantile(data$CW[data$dpi], 0.25)
+Q3 <- quantile(data$CW[data$dpi], 0.75)
+IQR <- Q3 - Q1
+
+# Define outlier limits
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+# Filter out the outliers for the 35 dpi data
+data_filtered <- data[!(data$dpi == c("07dpi", "21dpi", "35 dpi") & (data$CW < lower_bound | data$CW > upper_bound)), ]
+
+```
+
+```{r crypt_depth}
+
+# Create the boxplot with the desired color scheme
+ggplot(data_filtered, aes(x = Treatment, y = CD, fill = Treatment)) +
+  geom_boxplot() +
+  facet_grid(~ dpi, scales = "free_x") +  # Adjust scales and space based on dpi
+  labs(y = "Crypt Depth") +
+  scale_fill_manual(
+    values = c("NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple")) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+  )
+
+ggsave("outputs/crypt_depth_ARV_Exp_2022.svg", width = 12, height = 8, dpi = 600)
+
+
+```
+
+```{r crypt_width, echo=FALSE}
+
+
+# Now recreate the boxplot without the outliers
+ggplot(data_filtered, aes(x = Treatment, y = CW, fill = Treatment)) +
+  geom_boxplot() +
+  facet_grid(~ dpi, scales = "free_x") +  # Adjust scales and space based on dpi
+  labs(x = "Days Post-Inoculation (dpi)", y = "Crypt Width") +
+  scale_fill_manual(
+    values = c("NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple")) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+  )
+ggsave("outputs/crypt_width_ARV_Exp_2022.svg", width = 12, height = 8, dpi = 600)
+
+```
+
+```{r crypt stats, echo=FALSE}
+# Load necessary packages for statistical tests
+library(dplyr)
+library(ggplot2)
+library(car)  # For ANOVA and Levene's test
+library(emmeans)  # For post-hoc tests
+library(FSA)  # for dunnTest
+
+#1. Checking Homogeneity of Variance
+# Levene's test to check the homogeneity of variance (for both CD and CW)
+leveneTest(CD ~ Treatment, data = data_filtered)
+leveneTest(CW ~ Treatment, data = data_filtered)
+
+#2. Checking Normality
+# Shapiro-Wilk test for normality (for both CD and CW)
+shapiro.test(data_filtered$CD)
+shapiro.test(data_filtered$CW)
+
+#3. Run the tests for each dpi level
+
+# Create a list to store Kruskal-Wallis and post-hoc results
+kruskal_results <- list()
+dunn_results <- list()
+
+# Loop through each dpi level and perform Kruskal-Wallis for both CD and CW
+for (current_dpi in levels(data_filtered$dpi)) {
+  
+  # Subset data for the current dpi
+  subset_data <- subset(data_filtered, dpi == current_dpi)
+  
+  # 1. Kruskal-Wallis for Crypt Depth (CD)
+  kw_cd <- kruskal.test(CD ~ Treatment, data = subset_data)
+  
+  # Post-hoc Dunn's test for Crypt Depth (CD)
+  dunn_cd <- dunnTest(CD ~ Treatment, data = subset_data, method = "bh")
+  
+  # 2. Kruskal-Wallis for Crypt Width (CW)
+  kw_cw <- kruskal.test(CW ~ Treatment, data = subset_data)
+  
+  # Post-hoc Dunn's test for Crypt Width (CW)
+  dunn_cw <- dunnTest(CW ~ Treatment, data = subset_data, method = "bh")
+  
+  # Store the results in the list
+  kruskal_results[[current_dpi]] <- list(CD = kw_cd, CW = kw_cw)
+  dunn_results[[current_dpi]] <- list(CD = dunn_cd, CW = dunn_cw)
+  
+  # start printing results to a file
+  sink("outputs/crypt_stats_ARV_Exp_2022.txt", append = TRUE)
+  
+  # Print the results for each dpi
+  cat("\nKruskal-Wallis results for Crypt Depth (CD) - dpi:", current_dpi, "\n")
+  print(kw_cd)
+  
+  cat("\nPost-hoc Dunn's test results for Crypt Depth (CD) - dpi:", current_dpi, "\n")
+  print(dunn_cd)
+  
+  cat("\nKruskal-Wallis results for Crypt Width (CW) - dpi:", current_dpi, "\n")
+  print(kw_cw)
+  
+  cat("\nPost-hoc Dunn's test results for Crypt Width (CW) - dpi:", current_dpi, "\n")
+  print(dunn_cw)
+  
+  sink()
+}
+
+```

@@ -1,0 +1,142 @@
+---
+title: "Hock Lesions Fisher Exact Testing"
+author: "Zubair Khalid"
+date: "2024-09-12"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(showtext)
+library(viridis)
+
+# Load your preferred color scheme and theme
+font_add(family = "Times New Roman", regular = "/System/Library/Fonts/Supplemental/Times New Roman.ttf")
+showtext_auto()
+
+# Set global theme with your preferences
+theme_set(
+  theme_linedraw(base_size = 24, base_family = "Times New Roman") +
+    theme(
+      axis.title = element_text(size = 24),
+      legend.text = element_text(size = 20),
+      legend.title = element_text(size = 24, face = "bold"),
+      strip.text = element_text(size = 20),
+      legend.key.size = unit(2, "lines"),
+      panel.spacing = unit(2, "lines")
+    )
+)
+```
+
+```{r read data, echo=TRUE}
+
+data_07 <- read_excel("inputs/hock_lesion_scores.xlsx", sheet = "07 dpi")
+data_21 <- read_excel("inputs/hock_lesion_scores.xlsx", sheet = "21 dpi")
+data_35 <- read_excel("inputs/hock_lesion_scores.xlsx", sheet = "35 dpi")
+
+```     
+
+
+
+```{r categorize & cleanup}
+# Function to categorize lesion scores
+categorize_scores <- function(score) {
+  case_when(
+    score <= 5 ~ "Normal",
+    score >= 6 & score <= 10 ~ "Mild",
+    score >= 11 & score <= 14 ~ "Moderate",
+    score >= 15 & score <= 17 ~ "Severe"
+  )
+}
+
+```
+
+
+
+```{r fisher_exact_test, echo=TRUE}
+# Function to run Fisher's Exact Test and print clean contingency tables
+run_fisher_and_print <- function(data, dpi_label) {
+  # Categorize lesion scores
+  data$score_category <- categorize_scores(data$TOTAL_SCORE)
+  
+  # Create a clean contingency table between Group and lesion score categories
+  contingency_table <- table(data$Group, data$score_category)
+  
+  cat("## Contingency Table for ", dpi_label, ":\n")
+  print(as.data.frame.matrix(contingency_table))  # Cleaner output for contingency table
+  
+  # Fisher's Exact Test
+  fisher_test_result <- fisher.test(contingency_table)
+  cat("\n**Fisher's Exact Test Result for ", dpi_label, ":**\n")
+  print(fisher_test_result)
+}
+
+sink("outputs/fisher_exact_test_results.txt")
+
+# Run for each dpi
+run_fisher_and_print(data_07, "07 dpi")
+run_fisher_and_print(data_21, "21 dpi")
+run_fisher_and_print(data_35, "35 dpi")
+sink()
+
+```
+
+
+```{r}
+# Combine all data for bar plot
+data_combined <- rbind(
+  transform(data_07, dpi = "07 dpi"),
+  transform(data_21, dpi = "21 dpi"),
+  transform(data_35, dpi = "35 dpi")
+)
+
+# Categorize lesion scores in the combined data
+data_combined$score_category <- categorize_scores(data_combined$TOTAL_SCORE)
+
+# order treatments in data
+data_combined$Group <- factor(data_combined$Group, levels = c("NC", "Low AL", "High AL", "Low S1133", "High S1133"))
+data_combined$score_category <- factor(data_combined$score_category, levels = c("Normal", "Mild", "Moderate", "Severe"))
+
+
+# Plot stacked barplot
+ggplot(data_combined, aes(x = Group, fill = factor(score_category))) +
+  geom_bar(position = "fill") +
+  facet_grid(~ dpi) +
+  labs(y = "Proportion", x = "Group") +
+  # # Add beautiful color gradient
+  # scale_fill_viridis_d(option = "A", limits = c("No Lesions", "Mild", "Moderate", "Severe")) +
+  scale_fill_brewer(palette = "YlGnBu", limits = c("No Lesions", "Mild", "Moderate", "Severe")) +
+  # Change legend title
+  guides(fill = guide_legend(title = "Lesion Category")) +
+  theme(legend.position = "right")
+
+```
+
+
+```{r stacked barplot}
+# Plot stacked barplot with actual counts
+
+ggplot(data_combined, aes(x = Group, fill = factor(score_category))) +
+  geom_bar() +  # No "position = 'fill'" to show actual counts
+  facet_grid(~ dpi) +
+  labs(y = "No.  of  Chickens", x = "Treatment Group") +
+
+  # Use a smooth gradient color scale for increasing severity
+  scale_fill_manual(values = rev(viridis::viridis(4, option = "D"))) +
+  # Change legend title
+  guides(fill = guide_legend(title = "Hock Joint \nLesion Category")) +
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("outputs/hock_lesions_stacked_barplot.svg", width = 12, height = 8, dpi = 600)
+
+
+
+```

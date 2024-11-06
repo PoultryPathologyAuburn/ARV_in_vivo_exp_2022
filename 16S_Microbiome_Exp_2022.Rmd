@@ -1,0 +1,1338 @@
+---
+title: "16S Emrbyo Microbiome Exp 2022"
+author: "Zubair Khalid"
+date: "2024-08-25"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+editor_options:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+---
+
+```{r startup, include = FALSE}
+# install package dependency for r markdown files
+p <- c("rmarkdown", "knitr", "DT")
+install_package <- function(p) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    install.packages(p, repos = "http://cran.us.r-project.org/")
+  }
+}
+invisible(lapply(p, install_package))
+
+# xaringanExtra
+  if (!requireNamespace("xaringanExtra", quietly = TRUE)) {
+    devtools::install_github("gadenbuie/xaringanExtra", upgrade = "never")
+  }
+```
+
+```{r setup, include = FALSE, echo=F, warning=F, message=F}
+
+# setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# Load necessary packages
+library(ggplot2)
+library(showtext)
+
+# Add Times New Roman font
+font_add(family = "Times New Roman", regular = "/System/Library/Fonts/Supplemental/Times New Roman.ttf")
+showtext_auto()
+
+# Set a global theme
+theme_set(
+  theme_linedraw(base_size = 24, base_family = "Times New Roman") +
+    theme(
+      # axis.text = element_text(size = 20),
+      axis.title = element_text(size = 24),
+      legend.text = element_text(size = 20),
+      legend.title = element_text(size = 24, face = "bold"),
+      strip.text = element_text(size = 20),
+      legend.key.size = unit(2, "lines"),
+      panel.spacing = unit(2, "lines")# Turn off minor grid lines
+    )
+)
+```
+
+```{r load packages, echo=F, warning=F, message=F}
+p1 <- c("tidyverse", "vegan", "BiocManager", "qiime2R", "dplyr", "tidyr")
+p2 <- c("phyloseq", "ANCOMBC", "DESeq2", "ComplexHeatmap", "ggplot2", "RColorBrewer")
+load_package <- function(p) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    ifelse(p %in% p1, 
+           install.packages(p, repos = "http://cran.us.r-project.org/"), 
+           BiocManager::install(p))
+  }
+  library(p, character.only = TRUE, quietly = TRUE)
+}
+invisible(lapply(c(p1,p2), load_package))
+
+```
+
+```{r load files, echo=F, warning=F, message=F}
+otu <- read.table(file = "raw_inputs/genus_table.tsv", sep = "\t", header = T, row.names = 1, 
+                  skip = 1, comment.char = "")
+taxonomy <- read.table(file = "raw_inputs/taxonomy.tsv", sep = "\t", header = T ,row.names = 1)
+
+metadata <- read.table(file = "raw_inputs/new_metadata.txt", sep = "\t", header = T, row.names = 1)
+head(metadata)
+
+```
+
+```{r clean data, echo=F, warning=F, message=F}
+# clean the taxonomy, Greengenes format
+tax <- taxonomy %>%
+  select(Taxon) %>% 
+  separate(Taxon, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), "; ")
+
+tax.clean <- data.frame(row.names = row.names(tax),
+                        Kingdom = str_replace(tax[,1], "k__",""),
+                        Phylum = str_replace(tax[,2], "p__",""),
+                        Class = str_replace(tax[,3], "c__",""),
+                        Order = str_replace(tax[,4], "o__",""),
+                        Family = str_replace(tax[,5], "f__",""),
+                        Genus = str_replace(tax[,6], "g__",""),
+                        Species = str_replace(tax[,7], "s__",""),
+                        stringsAsFactors = FALSE)
+
+tax.clean[is.na(tax.clean)] <- ""
+tax.clean[tax.clean=="__"] <- ""
+
+for (i in 1:nrow(tax.clean)){
+  if (tax.clean[i,7] != ""){
+    tax.clean$Species[i] <- paste(tax.clean$Genus[i], tax.clean$Species[i], sep = " ")
+  } else if (tax.clean[i,2] == ""){
+    kingdom <- paste("Unc.", tax.clean[i,1], sep = " ")
+    tax.clean[i, 2:7] <- kingdom
+  } else if (tax.clean[i,3] == ""){
+    phylum <- paste("Unc.", tax.clean[i,2], sep = " ")
+    tax.clean[i, 3:7] <- phylum
+  } else if (tax.clean[i,4] == ""){
+    class <- paste("Unc.", tax.clean[i,3], sep = " ")
+    tax.clean[i, 4:7] <- class
+  } else if (tax.clean[i,5] == ""){
+    order <- paste("Unc.", tax.clean[i,4], sep = " ")
+    tax.clean[i, 5:7] <- order
+  } else if (tax.clean[i,6] == ""){
+    family <- paste("Unc.", tax.clean[i,5], sep = " ")
+    tax.clean[i, 6:7] <- family
+  } else if (tax.clean[i,7] == ""){
+    tax.clean$Species[i] <- paste("Unc. ",tax.clean$Genus[i], sep = " ")
+  }
+}
+
+tax.clean
+
+# Function to format names with underscores and remove "group"
+replace_underscore_and_group <- function(genus) {
+  if (grepl("_", genus)) {
+    # Extract the genus base (before the first underscore) and specific part (after the underscore)
+    parts <- unlist(strsplit(genus, "_"))
+    # Remove the word "group" if it's part of the name
+    specific_part <- gsub("_group", "", paste(parts[-1], collapse = "_")) 
+    genus_base <- parts[1]
+    return(paste0(genus_base, " (", specific_part, ")"))
+  }
+  return(genus)
+}
+
+# Apply the function to update Genus names
+tax.clean[, "Genus"] <- sapply(tax.clean[, "Genus"], replace_underscore_and_group)
+
+# Verify changes
+unique(tax.clean[, "Genus"])
+
+# Modify the Genus names by replacing specific patterns
+# Replace brackets [] in the Genus names
+tax.clean[, "Genus"] <- gsub("\\[|\\]", "", tax.clean[, "Genus"])
+
+
+unique(tax.clean[, "Genus"])
+
+
+OTU = metadataOTU = otu_table(as.matrix(otu), taxa_are_rows = TRUE)
+# replace periods in colnames of otu tablke with underscores
+colnames(OTU) <- gsub("\\.", "_", colnames(OTU))
+TAX = tax_table(as.matrix(tax.clean))
+
+
+SAMPLE <- sample_data(metadata)
+#replace hyphens in sample names with underscores
+rownames(SAMPLE) <- gsub("-", "_", rownames(SAMPLE))
+
+# tree has to be export from qiime using accessory command
+# ask to choose file
+TREE = read_tree("raw_inputs/rooted_tree.nwk")
+
+# merTREE# merge the data
+ps <- phyloseq(OTU, TAX, SAMPLE, TREE)
+summary(ps)
+ps
+tax
+```
+
+```{r save Rdata object, echo=F, warning=F, message=F}
+
+# # save as Rdata file
+# saveRDS(ps, "phyloseq_object.Rdata")
+```
+
+```{r depth, echo=F, warning=F, message=F}
+depth <- colSums(otu_table(ps))
+
+# plot fancy density plot
+ggplot(data.frame(depth = depth), aes(x = depth)) +
+      # add title and x and y labeles
+      ggtitle("Density Plot of Raw Sequencing Depth") +
+      xlab("No. of Sequences") +
+      ylab("Density") +
+      # add density plot
+      geom_density(fill = "green", color = "blue", alpha = 0.5)
+
+hist_plot_depth <- histogram(~depth, data = sample_data(ps), main = "Raw Sequencing Depth", xlab = "No. of Sequences", ylab = "Frequency")
+
+ggsave("output/raw_sequencing_depth_density_plot.svg", width = 12, height = 6, dpi = 600)
+
+#get depth stats
+sprintf("%.3f", mean(depth))
+sprintf("%.3f", sd(depth))
+sprintf("%.3f", min(depth))
+sprintf("%.3f", max(depth))
+```
+
+```{r rarefy, echo=F, warning=F, message=F}
+set.seed(111)
+ps# keep result reproductive
+ps.rarefied = rarefy_even_depth(ps, rngseed=1, sample.size=7000, replace=F)
+ps.rarefied
+
+# to calculate rarefied_depth
+depth_r <- colSums(otu_table(ps.rarefied))
+depth_r
+
+```
+
+```{r richness plot, echo=F, warning=F, message=F}
+# Set the order of Treatments globally for all plots
+ps.rarefied@sam_data$Treatment <- factor(ps.rarefied@sam_data$Treatment, levels = c("Pre-Inoc", "NC", "Low AL", "High AL", "Low S1133", "High S1133"))
+
+
+
+plot_richness(ps.rarefied, x = "Treatment", measures = "Shannon") +
+  facet_grid(~ dpi, scales = "free_x") +  # Adjust scales and space
+  # fill box plot with color
+  geom_boxplot(aes(fill = Treatment)) +
+  labs(x = "Days Post-Inoculation (dpi)", y = "Shannon's Diversity Index") +
+  scale_fill_manual(
+    values = c("Pre-Inoc" = "turquoise3", "NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple")) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+  )
+
+
+# Save the plot
+ggsave("output/shannon_boxplot_ordered.svg", width = 12, height = 8, dpi = 600)
+
+```
+
+```{r longitudinal richness, echo=F, warning=F, message=F}
+# plot line plots to show the trend longitudinally for each Treatment using median
+# connect days with line
+# Prepare the data for the line plot
+# Prepare the data for the line plot with error bars (mean ± standard error)
+rich_longitudinal <- estimate_richness(ps.rarefied, measures = "Shannon") %>%
+  cbind(sample_data(ps.rarefied)[, c("dpi", "Treatment")]) %>%
+  group_by(dpi, Treatment) %>%
+  summarise(
+    mean_shannon = mean(Shannon, na.rm = TRUE),
+    se_shannon = sd(Shannon, na.rm = TRUE) / sqrt(n()),  # Standard error
+    .groups = 'drop'
+  )
+
+# Convert dpi to numeric for proper ordering
+rich_longitudinal$dpi_numeric <- as.numeric(gsub("dpi", "", rich_longitudinal$dpi))
+
+# Filter the data to ensure 0dpi only includes "Pre-Inoc"
+rich_longitudinal_filtered <- rich_longitudinal %>%
+  filter(!(dpi_numeric == 0 & Treatment != "Pre-Inoc"))
+
+# Plot longitudinal trends with error bars
+ggplot(rich_longitudinal_filtered, aes(x = dpi_numeric, y = mean_shannon, color = Treatment, group = Treatment)) +
+  geom_line(size = 1) + 
+  geom_point(size = 3) + 
+  geom_errorbar(aes(ymin = mean_shannon - se_shannon, ymax = mean_shannon + se_shannon), width = 0.2) +  # Error bars
+  labs(x = "Days Post-Inoculation (dpi)", y = "Shannon's Diversity Index") +
+  scale_x_continuous(breaks = unique(rich_longitudinal_filtered$dpi_numeric)) +
+  scale_color_manual(
+    values = c("Pre-Inoc" = "turquoise3", "NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple")
+  )
+
+# Save the plot
+ggsave("output/longitudinal_shannon_with_error_bars.svg", width = 12, height = 6, dpi = 600)
+
+```
+
+```{r richness wilcoxon stats, echo=F, warning=F, message=F}
+
+# Estimate richness for each sample
+rich <- estimate_richness(ps.rarefied, measures = c("Observed", "Shannon"))
+
+# Add sample metadata (dpi and Treatment) to richness data
+rich <- cbind(rich, sample_data(ps.rarefied)[, c("dpi", "Treatment")])
+
+# Specify the dpi values you want to analyze
+dpi_values <- c("07 dpi", "21 dpi", "35 dpi")
+
+# Perform pairwise Wilcoxon test for each dpi comparing Treatments
+results_list <- list()
+
+for (dpi_val in dpi_values) {
+  # Subset richness data for the current dpi
+  rich_sub <- subset(rich, dpi == dpi_val)
+  
+  # Ensure there are at least two unique Treatments to compare
+  if (length(unique(rich_sub$Treatment)) > 1) {
+    # Perform pairwise Wilcoxon test comparing Treatments
+    wilcox_res <- tryCatch({
+      pairwise.wilcox.test(rich_sub$Shannon, 
+                           rich_sub$Treatment, 
+                           p.adjust.method = "BH")
+    }, error = function(e) {
+      warning(paste("Wilcoxon test failed for dpi:", dpi_val, "-", e$message))
+      return(NULL)
+    })
+    
+    if (!is.null(wilcox_res)) {
+      # Convert results to a tidy format
+      tab_res <- wilcox_res$p.value %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "Treatment1") %>%
+        gather(key = "Treatment2", value = "p.adj", -Treatment1) %>%
+        na.omit()
+      
+      # Add dpi information
+      tab_res$dpi <- dpi_val
+      
+      # Store results
+      results_list[[dpi_val]] <- tab_res
+    }
+  } else {
+    warning(paste("Not enough Treatments for dpi:", dpi_val))
+  }
+}
+
+# Combine results for all dpi values
+tab_all <- bind_rows(results_list)
+
+
+# # Write alpha richness results to file
+# write.table(tab_all, "output/alpha_shannon_results_by_Treatment.txt", sep = "\t", quote = FALSE, row.names = F)
+
+# filter and show only significant results
+significant_alpha_Treatment <- tab_all %>%
+  filter(p.adj < 0.05)
+
+significant_alpha_Treatment
+
+# Write alpha richness results to file
+write.table(significant_alpha_Treatment, "output/significant_alpha_shannon_results_by_Treatment.txt", sep = "\t", quote = FALSE, row.names = F)
+
+```
+
+```{r shannon kruskal & dunn, echo=F, warning=F, message=F}
+
+library(FSA)  # For Dunn's test
+
+# Estimate richness for each sample
+rich <- estimate_richness(ps.rarefied, measures = c("Observed", "Shannon"))
+
+# Add sample metadata (dpi and Treatment) to richness data
+rich <- cbind(rich, sample_data(ps.rarefied)[, c("dpi", "Treatment")])
+
+# Specify the dpi values you want to analyze
+dpi_values <- c("07 dpi", "21 dpi", "35 dpi")
+
+# Initialize a list to store results
+kruskal_results_list <- list()
+dunn_results_list <- list()
+
+for (dpi_val in dpi_values) {
+  # Subset richness data for the current dpi
+  rich_sub <- subset(rich, dpi == dpi_val)
+  
+  # Ensure there are at least two unique Treatments to compare
+  if (length(unique(rich_sub$Treatment)) > 1) {
+    
+    # Perform Kruskal-Wallis test
+    kruskal_res <- tryCatch({
+      kruskal.test(Shannon ~ Treatment, data = rich_sub)
+    }, error = function(e) {
+      warning(paste("Kruskal-Wallis test failed for dpi:", dpi_val, "-", e$message))
+      return(NULL)
+    })
+    
+    # Store Kruskal-Wallis results
+    if (!is.null(kruskal_res)) {
+      kruskal_results_list[[dpi_val]] <- data.frame(
+        dpi = dpi_val,
+        p.value = kruskal_res$p.value
+      )
+    }
+    
+    # Perform Dunn's posthoc test if Kruskal-Wallis is significant
+    if (!is.null(kruskal_res) && kruskal_res$p.value < 0.05) {
+      dunn_res <- tryCatch({
+        dunnTest(Shannon ~ Treatment, data = rich_sub, method = "bh")
+      }, error = function(e) {
+        warning(paste("Dunn's test failed for dpi:", dpi_val, "-", e$message))
+        return(NULL)
+      })
+      
+      if (!is.null(dunn_res)) {
+        # Convert results to a data frame
+        tab_res <- dunn_res$res %>%
+          as.data.frame() %>%
+          mutate(dpi = dpi_val)  # Add dpi information
+        
+        # Store Dunn's test results
+        dunn_results_list[[dpi_val]] <- tab_res
+      }
+    }
+    
+  } else {
+    warning(paste("Not enough Treatments for dpi:", dpi_val))
+  }
+}
+
+# Combine Kruskal-Wallis and Dunn's test results for all dpi values
+kruskal_tab_all <- bind_rows(kruskal_results_list)
+kruskal_tab_all
+dunn_tab_all <- bind_rows(dunn_results_list)
+
+# Write Kruskal-Wallis results to file
+write.table(kruskal_tab_all, "output/shannon_kruskal_results_by_Treatment.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Write Dunn's posthoc results to file
+write.table(dunn_tab_all, "output/shannon_dunn_posthoc_results_by_Treatment.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Filter and show only significant Dunn's test results
+significant_dunn_results <- dunn_tab_all %>%
+  filter(P.adj < 0.05)
+
+# Write significant Dunn's test results to file
+write.table(significant_dunn_results, "significant_dunn_posthoc_results_by_Treatment.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Display significant Dunn's test results
+significant_dunn_results
+
+
+plot <- ggplot(significant_dunn_results, aes(x = Comparison, y = Z)) +
+  geom_point() +
+  facet_wrap(~dpi) +
+  geom_errorbar(aes(ymin = Z, ymax = Z), width = 0.2) +
+  labs(x = "Comparison",
+       y = "Z value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+plot
+
+ggsave(filename = "output/dunn's posthoc comparisons.svg", plot,  width = 12, height = 8, dpi = 300)
+
+# test if NC at 7dpi and pre-inoc at 0dpi re different at 0 dpi and 7 dpi
+rich_sub_pre_nc <- subset(rich, (dpi == "0 dpi" & Treatment == "Pre-Inoc") | (dpi == "07 dpi" & Treatment == "NC"))
+wilcox_test_res <- wilcox.test(Shannon ~ Treatment, data = rich_sub_pre_nc)
+wilcox_test_res
+
+```
+
+```{r Pielou evenness, echo=F, warning=F, message=F}
+library(microbiome)
+
+# Recalculate Evenness using the microbiome package
+evenness_values <- microbiome::evenness(ps.rarefied, index = "Pielou")
+
+# Ensure the Evenness values are numeric and attach them to sample data
+sample_data(ps.rarefied)$Evenness <- as.numeric(evenness_values$pielou)
+
+# Check the Evenness values
+summary(sample_data(ps.rarefied)$Evenness)
+
+
+# Ensure that Evenness is a numeric vector
+sample_data(ps.rarefied)$Evenness <- as.numeric(as.character(sample_data(ps.rarefied)$Evenness))
+
+# Prepare the data for the line plot with error bars (mean ± standard error)
+evenness_longitudinal <- sample_data(ps.rarefied) %>%
+  as.data.frame() %>%
+  group_by(dpi, Treatment) %>%
+  summarise(
+    mean_evenness = mean(Evenness, na.rm = TRUE),
+    se_evenness = sd(Evenness, na.rm = TRUE) / sqrt(n())  # Standard error
+  ) %>%
+  ungroup()
+
+# Convert dpi to numeric for proper ordering
+evenness_longitudinal$dpi_numeric <- as.numeric(gsub("dpi", "", evenness_longitudinal$dpi))
+
+# Filter the data to ensure 0dpi only includes "Pre-Inoc"
+evenness_longitudinal_filtered <- evenness_longitudinal %>%
+  filter(!(dpi_numeric == 0 & Treatment != "Pre-Inoc"))
+
+
+summary(evenness_longitudinal_filtered)
+
+
+
+# Boxplot with Dark2 palette, ordered Treatments, and no x-axis title
+ggplot(sample_data(ps.rarefied), aes(x = Treatment, y = Evenness, fill = Treatment)) +
+  geom_boxplot() +
+  facet_grid(~ dpi, scales = "free_x") +  # Adjust scales and space
+  scale_fill_manual(
+    values = c("Pre-Inoc" = "turquoise3", "NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple")
+  ) +
+  # 
+  # scale_x_discrete(limits = c("Pre-Inoc", "NC", "Low AL", "High AL", "Low S1133", "High S1133")) +
+  
+  labs(y = "Pielou's Evenness", x = "") +  # Remove x-axis title and label y-axis
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),  # No x-axis title
+    axis.ticks.x = element_blank(),
+    # increase space between legends # Remove x-axis ticks
+  )
+
+# Save the plot
+ggsave("output/evenness_boxplot_without_x_ticks.svg", width = 12, height = 8, dpi = 600)
+
+
+```
+
+```{r evenness stats, echo=F, warning=F, message=F}
+# Load necessary libraries
+# Add sample metadata (dpi and Treatment) to the evenness data
+evenness_data <- data.frame(Evenness = sample_data(ps.rarefied)$Evenness) %>%
+  cbind(sample_data(ps.rarefied)[, c("dpi", "Treatment")])
+
+# Perform pairwise Wilcoxon test for each Treatment comparing dpi
+results_list <- list()
+
+for (treat in unique(evenness_data$Treatment)) {
+  # Subset evenness data for the current Treatment
+  evenness_sub <- subset(evenness_data, Treatment == treat)
+  
+  # Ensure there are at least two unique dpi groups to compare
+  if (length(unique(evenness_sub$dpi)) > 1) {
+    # Perform pairwise Wilcoxon test comparing dpi
+    wilcox_res <- tryCatch({
+      pairwise.wilcox.test(evenness_sub$Evenness, 
+                           evenness_sub$dpi, 
+                           p.adjust.method = "BH")
+    }, error = function(e) {
+      warning(paste("Wilcoxon test failed for Treatment:", treat, "-", e$message))
+      return(NULL)
+    })
+    
+    if (!is.null(wilcox_res)) {
+      # Convert results to a tidy format
+      tab_res <- wilcox_res$p.value %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "dpi1") %>%
+        gather(key = "dpi2", value = "p.adj", -dpi1) %>%
+        na.omit()
+      
+      # Add Treatment information
+      tab_res$Treatment <- treat
+      
+      # Store results
+      results_list[[treat]] <- tab_res
+    }
+  } else {
+    warning(paste("Not enough dpi groups for Treatment:", treat))
+  }
+}
+
+# Combine results for all Treatments
+tab_all <- bind_rows(results_list)
+
+# Write evenness results to file
+write.table(tab_all, "output/pielou_evenness_results_by_dpi.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Display the results
+tab_all
+
+# Filter and show only significant results
+significant_evenness_dpi <- tab_all %>%
+  filter(p.adj < 0.05)
+
+significant_evenness_dpi
+
+# Write significant evenness results to file
+write.table(significant_evenness_dpi, "output/significant_evenness_results_by_dpi.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Perform pairwise Wilcoxon test for each dpi comparing Treatments
+results_list_Treatment <- list()
+
+for (dpi_val in unique(evenness_data$dpi)) {
+  # Subset evenness data for the current dpi
+  evenness_sub <- subset(evenness_data, dpi == dpi_val)
+  
+  # Ensure there are at least two unique Treatments to compare
+  if (length(unique(evenness_sub$Treatment)) > 1) {
+    # Perform pairwise Wilcoxon test comparing Treatments
+    wilcox_res <- tryCatch({
+      pairwise.wilcox.test(evenness_sub$Evenness, 
+                           evenness_sub$Treatment, 
+                           p.adjust.method = "BH")
+    }, error = function(e) {
+      warning(paste("Wilcoxon test failed for dpi:", dpi_val, "-", e$message))
+      return(NULL)
+    })
+    
+    if (!is.null(wilcox_res)) {
+      # Convert results to a tidy format
+      tab_res <- wilcox_res$p.value %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "Treatment1") %>%
+        gather(key = "Treatment2", value = "p.adj", -Treatment1) %>%
+        na.omit()
+      
+      # Add dpi information
+      tab_res$dpi <- dpi_val
+      
+      # Store results
+      results_list_Treatment[[dpi_val]] <- tab_res
+    }
+  } else {
+    warning(paste("Not enough Treatments for dpi:", dpi_val))
+  }
+}
+
+# Combine results for all dpi values
+tab_all_Treatment <- bind_rows(results_list_Treatment)
+
+# Write evenness results to file
+write.table(tab_all_Treatment, "output/pielou_evenness_results_by_Treatment.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Filter and show only significant results
+significant_evenness_Treatment <- tab_all_Treatment %>%
+  filter(p.adj < 0.05)
+
+significant_evenness_Treatment
+
+# Write significant evenness results to file
+write.table(significant_evenness_Treatment, "output/significant_evenness_results_by_Treatment.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+```
+
+```{r beta diversity ordinations, echo=F, warning=F, message=F}
+# Calculate the UniFrac distance
+dist <- phyloseq::distance(ps.rarefied, method = "bray")
+
+# Perform PCoA ordination
+ordination <- ordinate(ps.rarefied, method = "PCoA", distance = dist)
+
+plot_ordination(ps.rarefied, ordination, color = "Treatment") + 
+  facet_wrap(~dpi, scales = "fixed") +  # Adjust facet scales if needed
+  stat_ellipse(aes(fill = Treatment, color = Treatment), type = "t", alpha = 0.1, geom = "polygon", size = 0.2) +  # Adding filled ellipses
+  scale_color_manual(
+    values = c("Pre-Inoc" = "turquoise3", "NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple")
+  ) +
+  scale_fill_manual(
+    values = c("Pre-Inoc" = "turquoise3", "NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple")
+  )
+
+
+ggsave("output/pcoa_filled_bray.svg", width = 12, height = 8, dpi = 600)
+
+```
+
+```{r beta div adonis2, echo=F, warning=F, message=F}
+library(phyloseq)
+library(vegan)
+
+# Calculate Bray-Curtis distance matrix
+beta_div_dist <- phyloseq::distance(ps.rarefied, method = "bray")
+beta_div_dist_matrix <- as.matrix(beta_div_dist)
+
+# Convert the sample_data to a standard data frame
+sample_data_df <- as.data.frame(as.matrix(sample_data(ps.rarefied)))
+
+# Check the structure of the converted data frame
+str(sample_data_df)
+
+# Ensure the grouping columns are factors
+sample_data_df$dpi <- factor(sample_data_df$dpi)
+sample_data_df$Treatment <- factor(sample_data_df$Treatment)
+
+# Perform PERMANOVA to assess the effect of dpi and Treatment on beta diversity
+adonis_res <- adonis2(beta_div_dist_matrix ~ Treatment * dpi, data = sample_data_df)
+
+# Display the results
+print(adonis_res)
+
+```
+
+```{r beta div permanova, echo=F, warning=F, message=F}
+
+pairwise_permanova_by_dpi <- function(dist_matrix, sample_data) {
+  results <- list()
+  dpi_levels <- c("07 dpi", "21 dpi", "35 dpi")
+  
+  for (dpi in dpi_levels) {
+    # Subset data for the current dpi level
+    subset_data <- sample_data[sample_data$dpi == dpi, ]
+    subset_samples <- rownames(subset_data)
+    
+    # Check if there are enough samples to perform analysis
+    if (length(subset_samples) < 2) {
+      warning(paste("Not enough samples for dpi:", dpi))
+      next
+    }
+    
+    subset_dist <- dist_matrix[subset_samples, subset_samples]
+    
+    # Pairwise comparisons for Treatment within the current dpi level
+    Treatment_levels <- levels(subset_data$Treatment)
+    
+    for (i in 1:(length(Treatment_levels) - 1)) {
+      for (j in (i + 1):length(Treatment_levels)) {
+        # Subset data for the pairwise Treatment comparison
+        Treatment_data <- subset_data[subset_data$Treatment %in% c(Treatment_levels[i], Treatment_levels[j]), ]
+        Treatment_samples <- rownames(Treatment_data)
+        
+        # Check if there are enough samples for the comparison
+        if (length(Treatment_samples) < 2) {
+          warning(paste("Not enough samples for Treatment comparison:", Treatment_levels[i], "vs", Treatment_levels[j], "at dpi:", dpi))
+          next
+        }
+        
+        Treatment_dist <- subset_dist[Treatment_samples, Treatment_samples]
+        
+        # Run adonis2 only if there are enough samples
+        if (nrow(Treatment_dist) > 1) {
+          adonis_res <- adonis2(Treatment_dist ~ Treatment, data = Treatment_data)
+          results[[paste("dpi:", dpi, "- Treatment:", Treatment_levels[i], "vs", Treatment_levels[j])]] <- adonis_res
+        } else {
+          warning(paste("Distance matrix too small for comparison between", Treatment_levels[i], "and", Treatment_levels[j], "at dpi:", dpi))
+        }
+      }
+    }
+  }
+  
+  return(results)
+}
+
+# Run the pairwise PERMANOVA by dpi level and Treatment
+pairwise_results_by_dpi <- pairwise_permanova_by_dpi(beta_div_dist_matrix, sample_data_df)
+
+# write to file using sink
+sink("output/pairwise_permanova_results_by_dpi.txt")
+pairwise_results_by_dpi
+# turn the sink off
+sink()
+
+```
+
+```{r beta stat heatmap, echo=F, warning=F, message=F}
+# Function to extract valid p-values from the pairwise PERMANOVA results
+extract_valid_pvalues <- function(pairwise_results) {
+  pvalue_list <- list()
+  
+  for (name in names(pairwise_results)) {
+    result <- pairwise_results[[name]]
+    
+    # Check if the aov.tab contains valid p-values (Pr(>F))
+    if (!is.null(result$`Pr(>F)`) && !all(is.na(result$`Pr(>F)`))) {
+      pvalue <- result$`Pr(>F)`[1]  # Extract the p-value for the first term (Treatment)
+      
+      # Check if p-value is numeric and valid
+      if (!is.na(pvalue) && is.numeric(pvalue)) {
+        # Extract dpi and Treatment comparison from the name
+        split_name <- strsplit(name, "-")[[1]]
+        dpi_value <- gsub("dpi: ", "", split_name[1])
+        comparison <- gsub(" Treatment: ", "", split_name[2])
+        
+        # Save the dpi, comparison, and p-value in a data frame
+        pvalue_list[[name]] <- data.frame(dpi = dpi_value, comparison = comparison, p_value = pvalue, stringsAsFactors = FALSE)
+      }
+    } else {
+      # Warning for missing p-values
+      message(paste("No valid p-value found for comparison:", name, "- skipping this result."))
+    }
+  }
+  
+  # Combine all valid p-values into a single data frame
+  if (length(pvalue_list) > 0) {
+    pvalue_df <- do.call(rbind, pvalue_list)
+    return(pvalue_df)
+  } else {
+    stop("No valid p-values were found.")
+  }
+}
+
+# Extract valid p-values from the pairwise results
+pvalue_df <- extract_valid_pvalues(pairwise_results_by_dpi)
+
+# Check the result
+print(pvalue_df)
+
+
+# Adjust the p-values for multiple testing (optional)
+pvalue_df$p_value_adj <- p.adjust(pvalue_df$p_value, method = "BH")
+
+??p.adjust
+
+max(pvalue_df$p_value_adj)
+min(pvalue_df$p_value_adj)
+mean(pvalue_df$p_value_adj)
+
+max(pvalue_df$p_value)
+min(pvalue_df$p_value)
+mean(pvalue_df$p_value)
+
+# Create the heatmap using ggplot2 with specific breaks for the gradient
+heatmap_plot <- ggplot(pvalue_df, aes(x = comparison, y = dpi, fill = p_value)) +
+  geom_tile(color = "white") +  # Create the heatmap using tiles
+  geom_text(aes(label = sprintf("%.3f", p_value)), color = "white", size = 5) +  # Add p-values as text labels
+  scale_fill_gradientn(
+    colors = c("blue", "white", "red"),  # Gradient colors
+    values = scales::rescale(c(0, 0.25, 0.5)),  # Specific breaks for gradient (0, 0.2, 1)
+    name = "p-value"
+  ) +
+  labs(
+       x = "Treatment Comparison",
+       y = "DPI") + # Use a minimal theme for the heatmap
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for readability
+
+# Print the heatmap
+print(heatmap_plot)
+
+# Save the heatmap as SVG
+ggsave("output/pairwise_permanova_heatmap_by_dpi.svg", width = 12, height = 8, dpi = 600, plot = heatmap_plot, device = "svg")
+
+```
+
+```{r beta dotplot, echo = FALSE}
+# Create a volcano plot of the pairwise PERMANOVA results
+ggplot(pvalue_df, aes(x = comparison, y = dpi, color = p_value)) +
+  geom_point(size = 8) +
+  scale_color_gradientn(
+    colors = c("blue", "gold", "red"), 
+    limits = c(0.001, 0.4),  # Set the limits from 0.001 to 0.4
+    breaks = c(0.001, 0.1, 0.2, 0.3, 0.4),  # Set custom breaks
+    name = "p value"
+  ) +
+  labs(x = "Treatment Comparison", y = "Days Post-Inoculation") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 20),
+    axis.text.y = element_text(size = 20)
+  )
+
+
+ggsave("output/pairwise_permanova_dot_plot_by_dpi.svg", width = 12, height = 8, dpi = 600)
+
+
+```
+
+```{r genus_abun clean,echo=F, warning=F, message=F}
+ps.rel = transform_sample_counts(ps.rarefied, function(x) x/sum(x)*100)
+# agglomerate taxa
+glom <- tax_glom(ps.rel, taxrank = 'Genus', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Genus <- as.character(ps.melt$Genus)
+
+ps.melt <- ps.melt %>%
+  group_by(Treatment, Genus) %>%
+  mutate(median=median(Abundance))
+
+
+# select group mean > 1
+keep <- unique(ps.melt$Genus[ps.melt$median > 2])
+ps.melt$Genus[!(ps.melt$Genus %in% keep)] <- "Others"
+#to get the same rows together
+ps.melt_all_samples <- ps.melt %>%
+  group_by(Sample,Treatment,Genus) %>%
+  summarise(Abundance=sum(Abundance))
+
+        
+# Aggregate genera contributing less than 2.5% into 'Others'
+
+threshold <- 2.5 # threshold percentage for categorizing as 'Others'
+ps.melt_sum <- ps.melt %>%
+  group_by(Treatment, Genus) %>%
+  summarise(Abundance = sum(Abundance)) %>%
+  mutate(Genus = ifelse(Abundance < threshold, "Others", Genus)) %>%
+  group_by(Treatment, Genus) %>%
+  summarise(Abundance = sum(Abundance))
+
+
+# Ensure data sums to 100% per Treatment
+ps.melt_sum <- ps.melt_sum %>%
+  group_by(Treatment) %>%
+  mutate(Abundance = Abundance / sum(Abundance) * 100)
+
+```
+
+```{r genus abundance plot, echo=F, warning=F, message=F}
+
+# Aggregate genera contributing less than 2.5% into 'Others'
+threshold <- 2.5 # threshold percentage for categorizing as 'Others'
+ps.melt_sum <- ps.melt %>%
+  group_by(Treatment, dpi, Genus) %>%
+  summarise(Abundance = sum(Abundance)) %>%
+  mutate(Genus = ifelse(Abundance < threshold, "Others", Genus)) %>%
+  group_by(Treatment, dpi, Genus) %>%
+  summarise(Abundance = sum(Abundance))
+
+# Ensure data sums to 100% per Treatment and dpi
+ps.melt_sum <- ps.melt_sum %>%
+  group_by(Treatment, dpi) %>%
+  mutate(Abundance = Abundance / sum(Abundance) * 100)
+
+# Reorder Genus by median abundance across all samples for proper plotting
+ps.melt_sum$Genus <- factor(ps.melt_sum$Genus, levels = ps.melt_sum %>%
+                              group_by(Genus) %>%
+                              summarise(Abundance = median(Abundance)) %>%
+                              arrange(desc(Abundance)) %>%
+                              pull(Genus))
+
+# Create the faceted bar plot by dpi
+# Genus abundance bar plot with Dark2 palette and ordered Treatments
+p <- ggplot(ps.melt_sum, aes(x=Treatment, y=Abundance, fill=Genus)) + 
+  geom_bar(stat="identity", aes(fill=Genus)) + 
+  labs(x="", y="Relative Abundance (%)") +
+  facet_wrap(~dpi, scales="free_x", nrow=1) +
+  # increase panel spacing between facets
+  scale_fill_brewer(palette="Paired") +
+  
+  # scale_x_discrete(limits=c("Pre-Inoc", "NC", "Low AL", "High AL", "Low S1133", "High S1133")) +
+  theme(legend.position="right", axis.text.x=element_text(angle=90, hjust =0.9), 
+        panel.spacing = unit(1.5, "lines"))
+
+p 
+
+ggsave("output/genus_abundance_plot_by_dpi.svg", plot = p, width = 12, height = 9, dpi = 600, device = "svg")
+
+
+```
+
+```{r Family diff abun, echo=F, warning=F, message=F}
+
+# Ensure Treatment is correctly ordered in the Phyloseq object
+# ps.rarefied@sam_data$Treatment <- factor(ps.rarefied@sam_data$Treatment, levels = c("NC", "Low AL", "High AL", "Low S1133", "High S1133"))
+
+# List to store results for each dpi
+all_family_results <- list()
+
+# Get unique numeric_dpi values excluding 0dpi
+unique_dpi <- sort(unique(ps.rarefied@sam_data$numeric_dpi[ps.rarefied@sam_data$numeric_dpi != 1]))
+unique_dpi
+
+# Loop over each dpi to subset and run ancombc2
+for (dpi in unique_dpi) {
+  
+  print(paste0("processing", dpi))
+  
+  # Create a logical vector indicating the samples to keep
+  samples_to_keep <- sample_data(ps.rarefied)$numeric_dpi == dpi
+  
+  # Subset the Phyloseq object using the logical vector
+  ps_subset <- prune_samples(samples_to_keep, ps.rarefied)
+  
+  # Check if the subset has samples
+  if (nsamples(ps_subset) > 0) {
+    
+    # Run ancombc2 with only Treatment in the formula
+    result <- ancombc2(ps_subset,
+                       fix_formula = "Treatment",
+                       tax_level = "Family",
+                       p_adj_method = "holm",  # p-value adjustment method
+                       group = "Treatment",  # The variable for which differential abundance is tested
+                       lib_cut = 1000,  # Minimum library size cut-off
+                       alpha = 0.05)  # Significance level
+    
+    # Extract the results and add the current dpi to the results
+    diff_abn_tidy <- as.data.frame(result$res)
+    diff_abn_tidy$numeric_dpi <- dpi
+    
+    # Gather logFC and p-values into long format
+    comparisons <- diff_abn_tidy %>%
+      select(taxon, starts_with("lfc_Treatment"), starts_with("p_Treatment"), numeric_dpi) %>%
+      pivot_longer(cols = -c(taxon, numeric_dpi), names_to = "metric", values_to = "value") %>%
+      separate(metric, into = c("type", "group"), sep = "_Treatment", fill = "right") %>%
+      pivot_wider(names_from = type, values_from = value) %>%
+      filter(p < 0.05)  # Filter for significant results by p-value
+    
+    # Append to the list of all results
+    all_family_results[[as.character(dpi)]] <- comparisons
+  } else {
+    print(paste("No samples found for dpi:", dpi))
+  }
+}
+
+
+
+# Combine results for all dpi
+combined_results <- bind_rows(all_family_results)
+
+# Filter to remove taxa that don't have significant results for any day
+combined_results <- combined_results %>%
+  group_by(taxon, numeric_dpi) %>%
+  filter(any(!is.na(lfc))) %>%
+  ungroup()
+
+# Count the frequency of each taxon across all dpi and groups
+top_taxa <- combined_results %>%
+  group_by(taxon) %>%
+  summarise(appearance_count = n()) %>%
+  top_n(10, wt = appearance_count) %>%  # Get the top 10 most frequent taxa
+  pull(taxon)  # Extract the taxon names
+
+# Filter the combined_results to only include the top 10 most frequent taxa
+combined_results <- combined_results %>%
+  filter(taxon %in% top_taxa)
+
+# Sort the taxa within each dpi facet by log fold change, 
+# with upregulated first (positive lfc) followed by downregulated (negative lfc)
+combined_results <- combined_results %>%
+  group_by(numeric_dpi) %>%
+  arrange(numeric_dpi, desc(lfc)) %>%  # Sort by log fold change within each dpi
+  ungroup()
+
+
+
+
+library(tidytext)
+# To ensure proper ordering within the plot, reorder `taxon` within each `dpi`
+combined_results <- combined_results %>%
+  mutate(taxon = reorder_within(taxon, lfc, numeric_dpi))
+
+# Create a mapping for dpi to descriptive titles
+dpi_labels <- c("7" = "7 dpi", "21" = "21 dpi", "35" = "35 dpi")
+
+# ordered groups
+ordered_treatments <- c("Low AL", "High AL", "Low S1133", "High S1133")
+
+# Plotting
+p <- ggplot(combined_results, aes(x = taxon, y = lfc)) +
+  geom_bar(stat = "identity", position = position_dodge(), aes(fill = group)) +
+  facet_wrap(~ numeric_dpi, labeller = as_labeller(dpi_labels), scales = "free_x") +  # use descriptive labels
+  labs(
+       x = "Family",
+       y = "Log Fold Change") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size =14),
+              panel.spacing = unit(1, "lines")) +
+  scale_x_reordered() +  # Ensure the taxa are ordered by lfc within each facet
+  scale_fill_manual(
+    values = c("Pre-Inoc" = "turquoise3", "NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple"), limits = ordered_treatments) + 
+  guides(fill = guide_legend(title = "Treatment"))
+
+# Print the plot
+print(p)
+
+
+# write results to file
+write.table(combined_results, "output/dpi_wise_family_diff_abun.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Save the plot as SVG
+ggsave("output/ancombc2_Family_barplot.svg", plot = p, dpi = 600, device = "svg")
+
+```
+
+```{r Genus diff abun, echo=F, warning=F, message=F}
+
+# # Ensure Treatment is correctly ordered in the Phyloseq object
+# ps.rarefied@sam_data$Treatment <- factor(ps.rarefied@sam_data$Treatment, levels = c("NC", "Low AL", "High AL", "Low S1133", "High S1133"))
+
+# List to store results for each dpi
+all_genus_results <- list()
+
+# Get unique numeric_dpi values excluding 0dpi
+unique_dpi <- sort(unique(ps.rarefied@sam_data$numeric_dpi[ps.rarefied@sam_data$numeric_dpi != 1]))
+unique_dpi
+
+# Loop over each dpi to subset and run ancombc2
+for (dpi in unique_dpi) {
+  
+  print(paste0("processing", dpi))
+  
+  # Create a logical vector indicating the samples to keep
+  samples_to_keep <- sample_data(ps.rarefied)$numeric_dpi == dpi
+  
+  # Subset the Phyloseq object using the logical vector
+  ps_subset <- prune_samples(samples_to_keep, ps.rarefied)
+  
+  # Check if the subset has samples
+  if (nsamples(ps_subset) > 0) {
+    
+    # Run ancombc2 with only Treatment in the formula
+    result <- ancombc2(ps_subset,
+                       fix_formula = "Treatment",
+                       tax_level = "Genus",
+                       p_adj_method = "holm",  # p-value adjustment method
+                       group = "Treatment",  # The variable for which differential abundance is tested
+                       lib_cut = 1000,  # Minimum library size cut-off
+                       alpha = 0.05)  # Significance level
+    
+    # Extract the results and add the current dpi to the results
+    diff_abn_tidy <- as.data.frame(result$res)
+    diff_abn_tidy$numeric_dpi <- dpi
+    # Gather logFC and p-values into long format
+    comparisons <- diff_abn_tidy %>%
+      select(taxon, starts_with("lfc_Treatment"), starts_with("p_Treatment"), numeric_dpi) %>%
+      pivot_longer(cols = -c(taxon, numeric_dpi), names_to = "metric", values_to = "value") %>%
+      separate(metric, into = c("type", "group"), sep = "_Treatment", fill = "right") %>%
+      pivot_wider(names_from = type, values_from = value) %>%
+      filter(p < 0.05)  # Filter for significant results by p-value
+    # Append to the list of all results
+    all_genus_results[[as.character(dpi)]] <- comparisons
+  } else {
+    print(paste("No samples found for dpi:", dpi))
+  }
+}
+
+
+
+# Combine results for all dpi
+combined_results <- bind_rows(all_genus_results)
+
+# Correctly replace any genus name ending with "-Rhizobium" to "Rhizobium"
+combined_results$taxon <- gsub(".*-Rhizobium", "Rhizobium", combined_results$taxon)
+
+# Filter to remove taxa that don't have significant results for any day
+combined_results <- combined_results %>%
+  group_by(taxon, numeric_dpi) %>%
+  filter(any(!is.na(lfc))) %>%
+  ungroup()
+
+length(unique(combined_results$taxon))
+# 30 Genera were identified as significant across all dpi
+
+# Count the frequency of each taxon across all dpi and groups
+top_taxa <- combined_results %>%
+  group_by(taxon) %>%
+  summarise(appearance_count = n()) %>%
+  top_n(10, wt = appearance_count) %>%  # Get the top 10 most frequent taxa
+  pull(taxon)  # Extract the taxon names
+
+length(levels(top_taxa))
+# 14 taxa were present 
+
+
+# Filter the combined_results to only include the top 10 most frequent taxa
+combined_results <- combined_results %>%
+  filter(taxon %in% top_taxa)
+
+# Sort the taxa within each dpi facet by log fold change, 
+# with upregulated first (positive lfc) followed by downregulated (negative lfc)
+combined_results <- combined_results %>%
+  group_by(numeric_dpi) %>%
+  arrange(numeric_dpi, desc(lfc)) %>%  # Sort by log fold change within each dpi
+  ungroup()
+
+library(tidytext)
+#reorder taxon 
+
+combined_results <- combined_results %>%
+  mutate(taxon = reorder_within(taxon, lfc, numeric_dpi))
+
+# Create a mapping for dpi to descriptive titles
+dpi_labels <- c("7" = "7 dpi", "21" = "21 dpi", "35" = "35 dpi")
+
+# ordered groups
+ordered_treatments <- c("Low AL", "High AL", "Low S1133", "High S1133")
+
+# Plotting
+p <- ggplot(combined_results, aes(x = taxon, y = lfc)) +
+  geom_bar(stat = "identity", position = position_dodge(), aes(fill = group)) +
+  facet_wrap(~ numeric_dpi, labeller = as_labeller(dpi_labels), scales = "free_x") +  # use descriptive labels
+  labs(
+    x = "Genus",
+    y = "Log Fold Change"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1, size = 14),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "right",    # Adjust legend position
+    legend.justification = c(1, 0.5), # Move legend slightly
+    legend.box.spacing = unit(1, "lines")  # Adjust the spacing
+  ) +
+  scale_x_reordered() +
+  # scale_x_discrete(expand = expansion(mult = c(0.1, 0.1))) +  # Increase spacing between x ticks
+  scale_fill_manual(
+    values = c("Pre-Inoc" = "turquoise3", "NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple"), 
+    limits = ordered_treatments
+  ) + 
+  guides(fill = guide_legend(title = "Treatment"))
+# Print the plot
+print(p)
+
+# write results to file
+write.table(combined_results, "output/dpi_wise_genus_diff_abun.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Save the plot as SVG
+ggsave("output/ancombc2_dpi_wise_top10_taxa_barplot_sorted.svg", width=12, height=8, dpi=600, plot = p, device = "svg")
+
+```
+
+```{r heatmap of diff abun, echo=F, warning=F, message=F}
+# Ensure Treatment is correctly ordered in the Phyloseq object
+# ps.rarefied@sam_data$Treatment <- factor(ps.rarefied@sam_data$Treatment, levels = c("NC", "Low AL", "High AL", "Low S1133", "High S1133"))
+
+# Combine results for all dpi
+combined_results <- bind_rows(all_genus_results)
+
+
+# Correctly replace any genus name ending with "-Rhizobium" to "Rhizobium"
+combined_results$taxon <- gsub(".*-Rhizobium", "Rhizobium", combined_results$taxon)
+
+
+# Filter to remove taxa that don't have significant results for any day
+combined_results <- combined_results %>%
+  group_by(taxon, numeric_dpi) %>%
+  filter(any(!is.na(lfc))) %>%
+  ungroup()
+
+# Count the frequency of each taxon across all dpi and groups
+top_taxa <- combined_results %>%
+  group_by(taxon) %>%
+  summarise(appearance_count = n()) %>%
+  top_n(10, wt = appearance_count) %>%  # Get the top 10 most frequent taxa
+  pull(taxon)  # Extract the taxon names
+
+# Filter the combined_results to only include the top 10 most frequent taxa
+combined_results <- combined_results %>%
+  filter(taxon %in% top_taxa)
+
+# Sort the taxa within each dpi facet by log fold change (upregulated first, downregulated after)
+combined_results <- combined_results %>%
+  group_by(numeric_dpi) %>%
+  arrange(numeric_dpi, desc(lfc)) %>%
+  ungroup()
+
+# Manually reorder the taxon factor by log fold change within each dpi, ensuring upregulated (positive lfc) is first
+combined_results <- combined_results %>%
+  mutate(taxon = factor(taxon, levels = unique(taxon[order(numeric_dpi, -lfc)])))  # Reorder taxa based on lfc, with positive first
+
+# Create a mapping for dpi to descriptive titles
+dpi_labels <- c("7" = "7 dpi", "21" = "21 dpi", "35" = "35 dpi")
+# ordered groups
+ordered_treatments <- c("Low AL", "High AL", "Low S1133", "High S1133")
+
+# Heatmap plotting
+heatmap_plot <- ggplot(combined_results, aes(x = group, y = taxon, fill = lfc)) +
+  geom_tile(color = "white") +  # Create the heatmap using tiles
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0,  # Color gradient for log fold change
+                       name = "Log Fold Change") +
+  #order x axis treatments
+  scale_x_discrete(limits = ordered_treatments) +
+  facet_wrap(~ numeric_dpi, labeller = as_labeller(dpi_labels)) +  # Facet by dpi
+  labs(x = "Treatment Group",
+       y = "Genus") +  # Use a minimal theme for heatmap
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size =18),
+        axis.text.y = element_text(size = 18)
+        )
+
+# Print the heatmap
+print(heatmap_plot)
+
+
+# Save the heatmap as SVG
+ggsave("output/differential_abundance_heatmap_faceted_by_dpi.svg", width=12, height=8, dpi=600,  plot = heatmap_plot, device = "svg")
+```
+
+
+```{r animated bar plots, echo=FALSE}
+library(tidytext)
+library(ggplot2)
+library(gganimate)
+library(dplyr)
+library(av)
+
+# Convert sample_data to a data frame and retain only relevant columns
+sample_metadata <- as.data.frame(as(sample_data(ps.rarefied), "matrix"))
+sample_metadata$Sample <- rownames(sample_metadata)
+
+# Select only relevant columns from sample_metadata to avoid duplication
+sample_metadata <- sample_metadata %>%
+  select(Sample)
+
+# Join the melted abundance data (ps.melt) with the sample metadata
+ps.melt_all_samples <- left_join(ps.melt, sample_metadata, by = "Sample")
+
+# Exclude pre-inoculation samples and remove rows with NA values
+ps.melt_all_samples_filtered <- ps.melt_all_samples %>%
+  filter(Treatment != "Pre-Inoc") %>%
+  drop_na(Abundance, Genus, Treatment, numeric_dpi)  # Remove rows with NA values
+
+# Ordered treatment groups
+ordered_treatments <- c("NC", "Low AL", "High AL", "Low S1133", "High S1133")
+
+# Calculate the standard deviation of abundances for each Genus and Treatment to find the top changing taxa
+top_taxa <- ps.melt_all_samples_filtered %>%
+  group_by(Genus) %>%
+  summarise(sd_abundance = sd(Abundance, na.rm = TRUE)) %>%
+  arrange(desc(sd_abundance)) %>%
+  top_n(10, wt = sd_abundance) %>%  # Select the top 10 taxa with the highest standard deviation
+  pull(Genus)  # Extract the names of the top taxa
+
+# Filter for the top changing taxa
+ps.melt_filtered <- ps.melt_all_samples_filtered %>%
+  filter(Genus %in% top_taxa)
+
+# Clean up genus names similar to the differential abundance cleaning
+ps.melt_filtered$Genus <- gsub(".*-Rhizobium", "Rhizobium", ps.melt_filtered$Genus)  # Replace any genus ending with "-Rhizobium" to "Rhizobium"
+
+# Sort the genera within each dpi based on their abundance
+ps.melt_filtered <- ps.melt_filtered %>%
+  group_by(numeric_dpi) %>%
+  arrange(desc(Abundance)) %>%
+  ungroup()
+
+# Create an animated bar chart
+p <- ggplot(ps.melt_filtered, aes(x = Genus, y = Abundance, fill = Treatment)) +
+  geom_bar(stat = "identity", position = "dodge") +  # Dodge bars for each treatment
+  labs(title = "Most Abundant Taxa Over Time: {frame_time} dpi", 
+       x = "Genus", 
+       y = "Relative Abundance (%)",
+       fill = "Treatment") +
+  # tranform y log
+  # scale_y_log10() +
+  # polar coordinates
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  transition_time(numeric_dpi) +  # Animate by numeric_dpi
+  ease_aes('cubic-in-out') +
+  scale_fill_manual(
+    values = c("NC" = "seagreen", "Low AL" = "darkgoldenrod1", 
+               "High AL" = "red", "Low S1133" = "#3F00FF", "High S1133" = "purple"),
+    breaks = ordered_treatments)  # Smooth transitions
+
+p
+
+# Render the animation in high quality and save as MP4 using av_renderer()
+animate(p, 
+        nframes = 100,           # Number of frames
+        fps = 10,                # Frames per second
+        width = 16,            # Width of the animation
+        height = 9,
+        units = "in",            # Units for width and height
+        res = 600,               # Resolution (DPI, for sharpness)
+        renderer = av_renderer("output/animated_top_taxa_abundance_high_quality.mp4"),
+        bitrate = 5000)          # Bitrate (higher value for better quality, adjust as needed)
+
+```
+
+
+

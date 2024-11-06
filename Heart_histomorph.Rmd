@@ -1,0 +1,136 @@
+---
+title: "R Notebook"
+output: html_notebook
+author: "Zubair Khalid"
+date: "09/08/2024"
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+
+# Load necessary packages
+library(ggplot2)
+library(readxl)
+library(showtext)
+library(dplyr)
+library(tidyr)
+
+# Add Times New Roman font
+font_add(family = "Times New Roman", regular = "/System/Library/Fonts/Supplemental/Times New Roman.ttf")
+showtext_auto()
+
+# Set a global theme
+theme_set(
+  theme_linedraw(base_size = 24, base_family = "Times New Roman") +
+    theme(
+      axis.title = element_text(size = 24),
+      legend.text = element_text(size = 20),
+      legend.title = element_text(size = 24, face = "bold"),
+      strip.text = element_text(size = 20),
+      legend.key.size = unit(2, "lines"),
+      panel.spacing = unit(2, "lines")
+    )
+)
+```
+
+
+```{r load data}
+# Load your data from the Excel file (adjust the path as needed)
+data_7dpi <- read_excel("inputs/Heart_measurements_Reo_Exp1_2022.xlsx", sheet = "7 dpi")
+data_21dpi <- read_excel("inputs/Heart_measurements_Reo_Exp1_2022.xlsx", sheet = "21 dpi")
+data_35dpi <- read_excel("inputs/Heart_measurements_Reo_Exp1_2022.xlsx", sheet = "35 dpi")
+
+# Add 'dpi' column to each dataframe
+data_7dpi$dpi <- "7 dpi"
+data_21dpi$dpi <- "21 dpi"
+data_35dpi$dpi$dpi <- "35 dpi"
+
+# Combine data into one dataframe
+data_combined <- rbind(data_7dpi, data_21dpi, data_35dpi)
+
+# Convert 'group' and 'dpi' columns to factors for proper plotting
+data_combined$group <- factor(data_combined$group, levels = c("NC", "Low AL", "Low S1133", "High AL", "High S1133"))
+data_combined$dpi <- factor(data_combined$dpi, levels = c("7 dpi", "21 dpi", "35 dpi"))
+
+# View the first few rows to check the structure
+head(data_combined)
+
+```
+
+
+```{r myofiber degradation boxplot}
+# Create a boxplot for good fibers, color-coded by treatment group
+ggplot(data_combined, aes(x = group, y = percent_bad_n_interstitium, fill = group)) +
+  geom_boxplot() +
+  facet_wrap(~ dpi) +
+  labs(y = "Degraded Myofibers (%)") +
+  scale_fill_manual(values = c("Pre- Inoculation" = "turquoise", "NC" = "seagreen", 
+                               "Low AL" = "darkgoldenrod1", "Low S1133" = "blue1", 
+                               "High AL" = "red", "High S1133" = "purple")) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  # adjust the legend title
+  guides(fill = guide_legend(title = "Treatment"))
+  
+
+# Save the plot
+ggsave("outputs/boxplot_bad_fibers.svg", width = 12, height = 8, dpi = 600)
+
+```
+
+```{r data wrangling}
+# Gather the good and bad fiber columns into long format for plotting
+
+data_long <- data_combined %>%
+  select(group, dpi, percent_good_fibers, percent_bad_n_interstitium) %>%
+  pivot_longer(cols = c(percent_good_fibers, percent_bad_n_interstitium),
+               names_to = "fiber_type", values_to = "percent_fibers") %>%
+  mutate(fiber_type = recode(fiber_type,
+                             "percent_good_fibers" = "Degraded Myofiber",
+                             "percent_bad_n_interstitium" = "Bad Fibers"))
+```
+
+
+
+```{r stats}
+library(car)
+library(dunn.test)
+library(FSA)
+
+# Perform Kruskal-Wallis and Dunn’s post-hoc tests for each fiber type and dpi
+kruskal_results <- list()
+dunn_results <- list()
+
+for (current_dpi in levels(data_combined$dpi)) {
+  # Subset data for the current dpi
+  subset_data <- subset(data_long, dpi == current_dpi)
+  
+  # Kruskal-Wallis test for Good Fibers
+  kw_test_good <- kruskal.test(percent_fibers ~ group, data = subset(subset_data, fiber_type == "Good Fibers"))
+  
+  # Kruskal-Wallis test for Bad Fibers
+  kw_test_bad <- kruskal.test(percent_fibers ~ group, data = subset(subset_data, fiber_type == "Bad Fibers"))
+  
+  # Store results
+  kruskal_results[[paste(current_dpi, "Good Fibers")]] <- kw_test_good
+  kruskal_results[[paste(current_dpi, "Bad Fibers")]] <- kw_test_bad
+}
+
+
+# change directory to outputs
+sink("outputs/heart_fiber_stats.txt", append = T)
+
+for (result in names(kruskal_results)) {
+  cat("\nKruskal-Wallis test for", result, "\n")
+  print(kruskal_results[[result]])
+}
+sink()
+
+```
+
+
